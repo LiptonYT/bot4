@@ -414,28 +414,55 @@ def history_embed(limit=15):
     return e
 
 
+class WarehouseActionSelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label='Запросить имущество', value='request', emoji='📦', description='Оформить заявку на получение со склада'),
+            discord.SelectOption(label='Оформить поставку', value='delivery', emoji='🚚', description='Зарегистрировать поставку и приложить фотографии'),
+            discord.SelectOption(label='Посмотреть остатки', value='stock', emoji='📋', description='Проверить наличие имущества на складе'),
+            discord.SelectOption(label='Пополнить склад', value='restock', emoji='➕', description='Добавить имущество — только старший состав'),
+            discord.SelectOption(label='История операций', value='history', emoji='📚', description='Посмотреть журнал склада — только старший состав'),
+        ]
+        super().__init__(placeholder='Выберите действие со складом...', min_values=1, max_values=1,
+                         options=options, custom_id='warehouse:action_select')
+
+    async def callback(self, interaction: discord.Interaction):
+        action = self.values[0]
+        if action == 'request':
+            return await interaction.response.send_modal(WarehouseRequestModal())
+        if action == 'delivery':
+            return await interaction.response.send_modal(DeliveryModal())
+        if action == 'stock':
+            return await interaction.response.send_message(embed=stock_embed(), view=StockView(), ephemeral=True)
+        if action == 'restock':
+            if not is_senior(interaction.user):
+                return await interaction.response.send_message('⛔ Пополнять склад может только старший состав.', ephemeral=True)
+            return await interaction.response.send_modal(RestockModal())
+        if action == 'history':
+            if not is_senior(interaction.user):
+                return await interaction.response.send_message('⛔ Полная история доступна только старшему составу.', ephemeral=True)
+            return await interaction.response.send_message(embed=history_embed(), ephemeral=True)
+
+
+class WarehouseMenuView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=180)
+        self.add_item(WarehouseActionSelect())
+
+
 class WarehousePanel(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
-    @discord.ui.button(label='Запросить склад', style=discord.ButtonStyle.primary, emoji='📦', custom_id='warehouse:request')
-    async def request(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(WarehouseRequestModal())
-    @discord.ui.button(label='Отчёт о поставке', style=discord.ButtonStyle.success, emoji='🚚', custom_id='warehouse:delivery')
-    async def delivery(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(DeliveryModal())
-    @discord.ui.button(label='Остатки склада', style=discord.ButtonStyle.secondary, emoji='📋', custom_id='warehouse:stock')
-    async def stock(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(embed=stock_embed(), view=StockView(), ephemeral=True)
-    @discord.ui.button(label='Пополнить склад', style=discord.ButtonStyle.success, emoji='➕', custom_id='warehouse:restock')
-    async def restock(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not is_senior(interaction.user):
-            return await interaction.response.send_message('⛔ Пополнять склад может только старший состав.', ephemeral=True)
-        await interaction.response.send_modal(RestockModal())
-    @discord.ui.button(label='История операций', style=discord.ButtonStyle.secondary, emoji='📚', custom_id='warehouse:history')
-    async def history(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not is_senior(interaction.user):
-            return await interaction.response.send_message('⛔ Полная история доступна только старшему составу.', ephemeral=True)
-        await interaction.response.send_message(embed=history_embed(), ephemeral=True)
+
+    @discord.ui.button(label='Открыть склад', style=discord.ButtonStyle.primary,
+                       emoji='📦', custom_id='warehouse:open')
+    async def open_warehouse(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title='📦 СКЛАД И СНАБЖЕНИЕ',
+            description='Выберите нужное действие в выпадающем меню ниже.',
+            color=discord.Color.from_rgb(125, 20, 30)
+        )
+        await interaction.response.send_message(embed=embed, view=WarehouseMenuView(), ephemeral=True)
 
 
 @bot.event
@@ -462,14 +489,10 @@ async def warehouse(interaction: discord.Interaction):
     if not is_senior(interaction.user):
         return await interaction.response.send_message('⛔ Опубликовать панель может только старший состав.', ephemeral=True)
     embed = discord.Embed(title='📦 ПГО «КАРАТЕЛИ» | СКЛАД И СНАБЖЕНИЕ',
-                          description='Выберите нужное действие в панели ниже.\n\n'
-                                      '📦 **Запросить склад** — оформить заявку на получение имущества.\n'
-                                      '🚚 **Отчёт о поставке** — передать сведения о поступившем имуществе и приложить фото.\n'
-                                      '📋 **Остатки склада** — посмотреть актуальное количество имущества.\n'
-                                      '➕ **Пополнить склад** — доступно старшему составу.\n'
-                                      '📚 **История операций** — полный журнал запросов, поставок и решений (старший состав).',
+                          description='Для работы со складом нажмите кнопку **«Открыть склад»**.\n'
+                                      'В открывшемся меню выберите нужное действие.',
                           color=discord.Color.from_rgb(125, 20, 30))
-    embed.set_footer(text='Единый склад • Все запросы и поставки проходят проверку старшего состава')
+    embed.set_footer(text='Единый склад • Запросы и поставки проходят проверку старшего состава')
     await interaction.response.send_message(embed=embed, view=WarehousePanel())
 
 
