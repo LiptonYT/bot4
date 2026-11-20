@@ -170,7 +170,7 @@ class WarehouseRequestModal(discord.ui.Modal, title='Запрос со скла�
             parsed = parse_items(str(self.items))
             number = next_number('request')
             embed = discord.Embed(title=f'📦 ЗАПРОС №{number:03d}', color=discord.Color.orange(), timestamp=datetime.now(timezone.utc))
-            embed.add_field(name='Заявитель', value=f'{self.full_name}\n{interaction.user.mention}', inline=True)
+            embed.add_field(name='Заявитель', value=str(self.full_name), inline=True)
             embed.add_field(name='Подразделение', value=str(self.department), inline=True)
             embed.add_field(name='Запрошенное имущество', value=fmt_items(parsed), inline=False)
             embed.add_field(name='Причина', value=str(self.reason), inline=False)
@@ -185,9 +185,7 @@ class WarehouseRequestModal(discord.ui.Modal, title='Запрос со скла�
             msg = await send_review(interaction.guild, embed, view)
             with db() as c:
                 c.execute('UPDATE records SET review_message_id=?, review_channel_id=? WHERE id=?', (msg.id, msg.channel.id, record_id))
-            add_audit('Создан запрос', f'ЗАПРОС №{number:03d}: {fmt_items(parsed)}', interaction.user)
             await interaction.response.send_message(f'✅ Запрос №{number:03d} отправлен старшему составу на рассмотрение.', ephemeral=True)
-            await send_audit(interaction.guild, 'Новый запрос со склада', f'**ЗАПРОС №{number:03d}**\nАвтор: {interaction.user.mention}\n{fmt_items(parsed)}')
         except (ValueError, RuntimeError, discord.HTTPException) as e:
             if interaction.response.is_done():
                 await interaction.followup.send(f'❌ {e}', ephemeral=True)
@@ -208,7 +206,7 @@ class DeliveryModal(discord.ui.Modal, title='Отчёт о поставке'):
             parsed = parse_items(str(self.items))
             number = next_number('delivery')
             embed = discord.Embed(title=f'🚚 ПОСТАВКА №{number:03d}', color=discord.Color.blue(), timestamp=datetime.now(timezone.utc))
-            embed.add_field(name='Ответственный', value=f'{self.full_name}\n{interaction.user.mention}', inline=True)
+            embed.add_field(name='Ответственный', value=str(self.full_name), inline=True)
             embed.add_field(name='Подразделение', value=str(self.department), inline=True)
             embed.add_field(name='Поставлено', value=fmt_items(parsed), inline=False)
             embed.add_field(name='Дополнительная информация', value=str(self.extra) or 'Не указана', inline=False)
@@ -269,6 +267,21 @@ class RestockModal(discord.ui.Modal, title='Пополнение общего с
             await send_audit(interaction.guild, '📥 Пополнение общего склада', f'Старший состав: {interaction.user.mention}\n{details}\nОснование: {str(self.note) or "Не указано"}', discord.Color.green())
         except ValueError as e:
             await interaction.response.send_message(f'❌ {e}', ephemeral=True)
+
+
+class ApproveModal(discord.ui.Modal, title='Причина одобрения'):
+    reason = discord.ui.TextInput(
+        label='Укажи причину одобрения',
+        style=discord.TextStyle.paragraph,
+        placeholder='Например: имущество выдано по назначению / поставка подтверждена',
+        required=True,
+        max_length=500
+    )
+    def __init__(self, record_id: int, kind: str):
+        super().__init__()
+        self.record_id, self.kind = record_id, kind
+    async def on_submit(self, interaction: discord.Interaction):
+        await decide(interaction, self.record_id, self.kind, True, str(self.reason))
 
 
 class RejectModal(discord.ui.Modal, title='Причина отклонения'):
@@ -337,7 +350,8 @@ async def decide(interaction: discord.Interaction, record_id: int, kind: str, ap
             row = c.execute('SELECT quantity FROM inventory WHERE item=? COLLATE NOCASE', (name,)).fetchone()
             updated_items.append(f'{name}: {row["quantity"] if row else 0} шт. на складе')
     action = f'{kind_label} №{number:03d} — {status}. Проверил: {interaction.user}. Причина: {reason or "—"}'
-    add_audit('Решение по обращению', action, interaction.user)
+    if kind != 'request':
+        add_audit('Решение по обращению', action, interaction.user)
     for child in interaction.message.components:
         pass
     try:
@@ -351,9 +365,10 @@ async def decide(interaction: discord.Interaction, record_id: int, kind: str, ap
     except discord.HTTPException:
         pass
     await interaction.response.send_message(f'✅ {kind_label} №{number:03d}: {status.lower()}.', ephemeral=True)
-    await send_audit(interaction.guild, f'{"✅" if approved else "❌"} {kind_label} №{number:03d}: {status}',
-                     f'Проверил: {interaction.user.mention}\nПричина: {reason or "Не указана"}\n' + ('\n'.join(updated_items) if updated_items else ''),
-                     discord.Color.green() if approved else discord.Color.red())
+    if kind != 'request':
+        await send_audit(interaction.guild, f'{"✅" if approved else "❌"} {kind_label} №{number:03d}: {status}',
+                         f'Проверил: {interaction.user.mention}\nПричина: {reason or "Не указана"}\n' + ('\n'.join(updated_items) if updated_items else ''),
+                         discord.Color.green() if approved else discord.Color.red())
     try:
         user = interaction.guild.get_member(rec['user_id']) or await bot.fetch_user(rec['user_id'])
         await user.send(f'{"✅" if approved else "❌"} Ваш {kind_label.lower()} №{number:03d} {status.lower()}.\nПричина: {reason or "Не указана"}')
@@ -370,10 +385,109 @@ class DecisionView(discord.ui.View):
         self.reject.custom_id = prefix + ':no'
     @discord.ui.button(label='Одобрить', style=discord.ButtonStyle.success, emoji='✅')
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await decide(interaction, self.record_id, self.kind, True)
+        await interaction.response.send_modal(ApproveModal(self.record_id, self.kind))
     @discord.ui.button(label='Отклонить', style=discord.ButtonStyle.danger, emoji='❌')
     async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(RejectModal(self.record_id, self.kind))
+
+
+class RenameInventoryModal(discord.ui.Modal, title='Переименовать позицию'):
+    old_name = discord.ui.TextInput(label='Текущее название', max_length=80)
+    new_name = discord.ui.TextInput(label='Новое название', max_length=80)
+    async def on_submit(self, interaction: discord.Interaction):
+        if not is_senior(interaction.user):
+            return await interaction.response.send_message('⛔ Доступно только старшему составу.', ephemeral=True)
+        old, new = str(self.old_name).strip(), str(self.new_name).strip()
+        if not old or not new:
+            return await interaction.response.send_message('❌ Оба названия обязательны.', ephemeral=True)
+        try:
+            with db() as c:
+                row = c.execute('SELECT quantity FROM inventory WHERE item=? COLLATE NOCASE', (old,)).fetchone()
+                if row is None:
+                    return await interaction.response.send_message('❌ Такая позиция не найдена.', ephemeral=True)
+                duplicate = c.execute('SELECT 1 FROM inventory WHERE item=? COLLATE NOCASE', (new,)).fetchone()
+                if duplicate:
+                    return await interaction.response.send_message('❌ Позиция с таким названием уже существует.', ephemeral=True)
+                c.execute('UPDATE inventory SET item=?, updated_at=? WHERE item=? COLLATE NOCASE', (new, now(), old))
+            details = f'Позиция «{old}» переименована в «{new}». Остаток сохранён: {row["quantity"]} шт.'
+            add_audit('Переименование позиции', details, interaction.user)
+            await interaction.response.send_message('✅ Название позиции изменено.', ephemeral=True)
+            await send_audit(interaction.guild, '✏️ Переименование позиции склада', f'Старший состав: {interaction.user.mention}\n{details}')
+        except sqlite3.IntegrityError:
+            await interaction.response.send_message('❌ Не удалось переименовать позицию: такое название уже занято.', ephemeral=True)
+
+
+class DeleteInventoryModal(discord.ui.Modal, title='Удалить позицию'):
+    item_name = discord.ui.TextInput(label='Название позиции для удаления', max_length=80)
+    async def on_submit(self, interaction: discord.Interaction):
+        if not is_senior(interaction.user):
+            return await interaction.response.send_message('⛔ Доступно только старшему составу.', ephemeral=True)
+        name = str(self.item_name).strip()
+        with db() as c:
+            row = c.execute('SELECT quantity FROM inventory WHERE item=? COLLATE NOCASE', (name,)).fetchone()
+            if row is None:
+                return await interaction.response.send_message('❌ Такая позиция не найдена.', ephemeral=True)
+            c.execute('DELETE FROM inventory WHERE item=? COLLATE NOCASE', (name,))
+        details = f'Позиция «{name}» удалена. Остаток перед удалением: {row["quantity"]} шт.'
+        add_audit('Удаление позиции', details, interaction.user)
+        await interaction.response.send_message('✅ Позиция удалена со склада.', ephemeral=True)
+        await send_audit(interaction.guild, '🗑️ Удаление позиции склада', f'Старший состав: {interaction.user.mention}\n{details}')
+
+
+class SetInventoryQuantityModal(discord.ui.Modal, title='Изменить остаток'):
+    item_name = discord.ui.TextInput(label='Название позиции', max_length=80)
+    quantity = discord.ui.TextInput(label='Новое количество (0 или больше)', max_length=10)
+    note = discord.ui.TextInput(label='Причина изменения', style=discord.TextStyle.paragraph, max_length=300)
+    async def on_submit(self, interaction: discord.Interaction):
+        if not is_senior(interaction.user):
+            return await interaction.response.send_message('⛔ Доступно только старшему составу.', ephemeral=True)
+        name = str(self.item_name).strip()
+        try:
+            qty = int(str(self.quantity).strip())
+            if qty < 0:
+                raise ValueError
+        except ValueError:
+            return await interaction.response.send_message('❌ Количество должно быть целым числом от 0 и выше.', ephemeral=True)
+        with db() as c:
+            row = c.execute('SELECT quantity FROM inventory WHERE item=? COLLATE NOCASE', (name,)).fetchone()
+            if row is None:
+                return await interaction.response.send_message('❌ Такая позиция не найдена. Сначала добавьте её через пополнение.', ephemeral=True)
+            old_qty = row['quantity']
+            c.execute('UPDATE inventory SET quantity=?, updated_at=? WHERE item=? COLLATE NOCASE', (qty, now(), name))
+        details = f'«{name}»: {old_qty} → {qty} шт. Причина: {self.note}'
+        add_audit('Изменение остатка', details, interaction.user)
+        await interaction.response.send_message('✅ Остаток изменён.', ephemeral=True)
+        await send_audit(interaction.guild, '⚖️ Изменение остатка склада', f'Старший состав: {interaction.user.mention}\n{details}')
+
+
+class InventoryManagementSelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label='Добавить позицию / количество', value='add', emoji='➕'),
+            discord.SelectOption(label='Переименовать позицию', value='rename', emoji='✏️'),
+            discord.SelectOption(label='Изменить остаток', value='quantity', emoji='⚖️'),
+            discord.SelectOption(label='Удалить позицию', value='delete', emoji='🗑️'),
+        ]
+        super().__init__(placeholder='Выберите управление складом...', min_values=1, max_values=1,
+                         options=options, custom_id='warehouse:inventory_manage')
+    async def callback(self, interaction: discord.Interaction):
+        if not is_senior(interaction.user):
+            return await interaction.response.send_message('⛔ Управление складом доступно только старшему составу.', ephemeral=True)
+        action = self.values[0]
+        if action == 'add':
+            return await interaction.response.send_modal(RestockModal())
+        if action == 'rename':
+            return await interaction.response.send_modal(RenameInventoryModal())
+        if action == 'quantity':
+            return await interaction.response.send_modal(SetInventoryQuantityModal())
+        if action == 'delete':
+            return await interaction.response.send_modal(DeleteInventoryModal())
+
+
+class InventoryManagementView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=180)
+        self.add_item(InventoryManagementSelect())
 
 
 class StockView(discord.ui.View):
@@ -398,7 +512,7 @@ def stock_embed():
 
 def history_embed(limit=15):
     with db() as c:
-        rows = c.execute('SELECT * FROM records ORDER BY id DESC LIMIT ?', (limit,)).fetchall()
+        rows = c.execute("SELECT * FROM records WHERE kind='delivery' ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
         audit = c.execute('SELECT * FROM audit ORDER BY id DESC LIMIT ?', (limit,)).fetchall()
     e = discord.Embed(title='📚 ИСТОРИЯ СКЛАДА', color=discord.Color.dark_purple(), timestamp=datetime.now(timezone.utc))
     if not rows and not audit:
@@ -420,7 +534,8 @@ class WarehouseActionSelect(discord.ui.Select):
             discord.SelectOption(label='Запросить имущество', value='request', emoji='📦', description='Оформить заявку на получение со склада'),
             discord.SelectOption(label='Оформить поставку', value='delivery', emoji='🚚', description='Зарегистрировать поставку и приложить фотографии'),
             discord.SelectOption(label='Посмотреть остатки', value='stock', emoji='📋', description='Проверить наличие имущества на складе'),
-            discord.SelectOption(label='Пополнить склад', value='restock', emoji='➕', description='Добавить имущество — только старший состав'),
+            discord.SelectOption(label='Пополнить склад', value='restock', emoji='➕', description='Добавить количество — только старший состав'),
+            discord.SelectOption(label='Управление позициями', value='manage', emoji='⚙️', description='Добавлять, переименовывать и удалять позиции'),
             discord.SelectOption(label='История операций', value='history', emoji='📚', description='Посмотреть журнал склада — только старший состав'),
         ]
         super().__init__(placeholder='Выберите действие со складом...', min_values=1, max_values=1,
@@ -438,6 +553,10 @@ class WarehouseActionSelect(discord.ui.Select):
             if not is_senior(interaction.user):
                 return await interaction.response.send_message('⛔ Пополнять склад может только старший состав.', ephemeral=True)
             return await interaction.response.send_modal(RestockModal())
+        if action == 'manage':
+            if not is_senior(interaction.user):
+                return await interaction.response.send_message('⛔ Управление складом доступно только старшему составу.', ephemeral=True)
+            return await interaction.response.send_message('⚙️ **Управление позициями склада**\nВыберите действие:', view=InventoryManagementView(), ephemeral=True)
         if action == 'history':
             if not is_senior(interaction.user):
                 return await interaction.response.send_message('⛔ Полная история доступна только старшему составу.', ephemeral=True)
