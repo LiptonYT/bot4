@@ -75,6 +75,22 @@ def init_db():
             actor_name TEXT NOT NULL,
             created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS treasury (
+            id INTEGER PRIMARY KEY CHECK(id = 1),
+            balance INTEGER NOT NULL DEFAULT 0 CHECK(balance >= 0),
+            updated_at TEXT NOT NULL
+        );
+        INSERT OR IGNORE INTO treasury(id, balance, updated_at) VALUES (1, 0, '');
+        CREATE TABLE IF NOT EXISTS treasury_transactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            operation TEXT NOT NULL CHECK(operation IN ('Пополнение', 'Снятие')),
+            amount INTEGER NOT NULL CHECK(amount > 0),
+            balance_after INTEGER NOT NULL CHECK(balance_after >= 0),
+            reason TEXT NOT NULL,
+            actor_id INTEGER NOT NULL,
+            actor_name TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
         ''')
         # Миграция старой базы: отдельная ветка для фотографий поставки.
         cols = {row['name'] for row in c.execute('PRAGMA table_info(records)').fetchall()}
@@ -266,6 +282,96 @@ class RestockModal(discord.ui.Modal, title='Пополнение общего с
             await send_audit(interaction.guild, '📥 Пополнение общего склада', f'Старший состав: {interaction.user.mention}\n{details}\nОснование: {str(self.note) or "Не указано"}', discord.Color.green())
         except ValueError as e:
             await interaction.response.send_message(f'❌ {e}', ephemeral=True)
+
+
+class TreasuryOperationModal(discord.ui.Modal):
+    amount = discord.ui.TextInput(label='Сумма в рублях', placeholder='Например: 50000', max_length=12)
+    reason = discord.ui.TextInput(label='Причина операции', style=discord.TextStyle.paragraph,
+                                  placeholder='Укажи основание пополнения или снятия', max_length=500)
+
+    def __init__(self, operation: str):
+        super().__init__(title='Пополнение казны' if operation == 'Пополнение' else 'Снятие из казны')
+        self.operation = operation
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not is_senior(interaction.user):
+            return await interaction.response.send_message('⛔ Управлять казной может только старший состав.', ephemeral=True)
+        raw_amount = str(self.amount).strip().replace(' ', '').replace(',', '')
+        try:
+            amount = int(raw_amount)
+            if amount <= 0:
+                raise ValueError
+        except ValueError:
+            return await interaction.response.send_message('❌ Укажи целую сумму в рублях больше нуля.', ephemeral=True)
+        reason = str(self.reason).strip()
+        if not reason:
+            return await interaction.response.send_message('❌ Укажи причину операции.', ephemeral=True)
+
+        with db() as c:
+            c.execute('BEGIN IMMEDIATE')
+            row = c.execute('SELECT balance FROM treasury WHERE id=1').fetchone()
+            old_balance = int(row['balance']) if row else 0
+            if self.operation == 'Снятие' and amount > old_balance:
+                return await interaction.response.send_message(
+                    f'❌ Недостаточно средств. В казне сейчас **{old_balance:,} ₽**.'.replace(',', ' '), ephemeral=True)
+            new_balance = old_balance + amount if self.operation == 'Пополнение' else old_balance - amount
+            c.execute('UPDATE treasury SET balance=?, updated_at=? WHERE id=1', (new_balance, now()))
+            c.execute('''INSERT INTO treasury_transactions(operation,amount,balance_after,reason,actor_id,actor_name,created_at)
+                         VALUES(?,?,?,?,?,?,?)''',
+                      (self.operation, amount, new_balance, reason, interaction.user.id, str(interaction.user), now()))
+
+        sign = '+' if self.operation == 'Пополнение' else '−'
+        details = f'{self.operation}: {sign}{amount:,} ₽\nБаланс: {old_balance:,} → {new_balance:,} ₽\nПричина: {reason}'.replace(',', ' ')
+        add_audit(f'{self.operation} казны', details, interaction.user)
+        await interaction.response.send_message(
+            f'✅ Операция выполнена. Новый баланс казны: **{new_balance:,} ₽**.'.replace(',', ' '), ephemeral=True)
+        await send_audit(interaction.guild, f'💰 {self.operation} казны',
+                         f'Сотрудник: {interaction.user.mention}\nСумма: **{sign}{amount:,} ₽**\n'
+                         f'Баланс: **{old_balance:,} → {new_balance:,} ₽**\nПричина: {reason}'.replace(',', ' '),
+                         discord.Color.green() if self.operation == 'Пополнение' else discord.Color.orange())
+
+
+def treasury_embed():
+    with db() as c:
+        row = c.execute('SELECT balance, updated_at FROM treasury WHERE id=1').fetchone()
+        transactions = c.execute('SELECT * FROM treasury_transactions ORDER BY id DESC LIMIT 8').fetchall()
+    balance = int(row['balance']) if row else 0
+    embed = discord.Embed(title='💰 КАЗНА СКЛАДА ПГО «КАРАТЕЛИ»',
+                          description=f'**Текущий баланс**\n# {balance:,} ₽'.replace(',', ' '),
+                          color=discord.Color.gold(), timestamp=datetime.now(timezone.utc))
+    if transactions:
+        lines = []
+        for tx in transactions:
+            sign = '+' if tx['operation'] == 'Пополнение' else '−'
+            lines.append(f'**{sign}{tx["amount"]:,} ₽** — {discord.utils.escape_markdown(tx["operation"])}\n'
+                         f'↳ {discord.utils.escape_markdown(tx["actor_name"])} • {tx["created_at"]}\n'
+                         f'↳ Причина: {discord.utils.escape_markdown(tx["reason"])}')
+        embed.add_field(name='📜 Последние операции', value='\n\n'.join(lines)[:1024], inline=False)
+    else:
+        embed.add_field(name='📜 История операций', value='Операций пока нет.', inline=False)
+    embed.set_footer(text='Пополнение и снятие доступны только старшему составу')
+    return embed
+
+
+class TreasuryView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=180)
+
+    @discord.ui.button(label='Пополнить казну', style=discord.ButtonStyle.success, emoji='➕')
+    async def deposit(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_senior(interaction.user):
+            return await interaction.response.send_message('⛔ Управлять казной может только старший состав.', ephemeral=True)
+        await interaction.response.send_modal(TreasuryOperationModal('Пополнение'))
+
+    @discord.ui.button(label='Снять деньги', style=discord.ButtonStyle.danger, emoji='➖')
+    async def withdraw(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_senior(interaction.user):
+            return await interaction.response.send_message('⛔ Управлять казной может только старший состав.', ephemeral=True)
+        await interaction.response.send_modal(TreasuryOperationModal('Снятие'))
+
+    @discord.ui.button(label='Обновить', style=discord.ButtonStyle.secondary, emoji='🔄')
+    async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(embed=treasury_embed(), view=self)
 
 
 class ApproveModal(discord.ui.Modal, title='Причина одобрения'):
@@ -551,6 +657,7 @@ class WarehouseActionSelect(discord.ui.Select):
             discord.SelectOption(label='Пополнить склад', value='restock', emoji='➕', description='Добавить количество — только старший состав'),
             discord.SelectOption(label='Управление позициями', value='manage', emoji='⚙️', description='Добавлять, переименовывать и удалять позиции'),
             discord.SelectOption(label='История операций', value='history', emoji='📚', description='Посмотреть журнал склада — только старший состав'),
+            discord.SelectOption(label='Казна склада', value='treasury', emoji='💰', description='Баланс, пополнение и снятие денежных средств'),
         ]
         super().__init__(placeholder='Выберите действие со складом...', min_values=1, max_values=1,
                          options=options, custom_id='warehouse:action_select')
@@ -575,6 +682,8 @@ class WarehouseActionSelect(discord.ui.Select):
             if not is_senior(interaction.user):
                 return await interaction.response.send_message('⛔ Полная история доступна только старшему составу.', ephemeral=True)
             return await interaction.response.send_message(embed=history_embed(), ephemeral=True)
+        if action == 'treasury':
+            return await interaction.response.send_message(embed=treasury_embed(), view=TreasuryView(), ephemeral=True)
 
 
 class WarehouseMenuView(discord.ui.View):
