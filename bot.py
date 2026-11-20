@@ -159,7 +159,6 @@ async def send_review(guild, embed, view):
 
 
 class WarehouseRequestModal(discord.ui.Modal, title='Запрос со склада'):
-    full_name = discord.ui.TextInput(label='Имя и фамилия', placeholder='Например: Иван Иванов', max_length=80)
     department = discord.ui.TextInput(label='Подразделение', placeholder='Например: ОО / ОВБ', max_length=60)
     items = discord.ui.TextInput(label='Предметы и количество', style=discord.TextStyle.paragraph,
                                  placeholder='Пистолет - 2\nДефибриллятор - 1', max_length=1000)
@@ -170,7 +169,7 @@ class WarehouseRequestModal(discord.ui.Modal, title='Запрос со скла�
             parsed = parse_items(str(self.items))
             number = next_number('request')
             embed = discord.Embed(title=f'📦 ЗАПРОС №{number:03d}', color=discord.Color.orange(), timestamp=datetime.now(timezone.utc))
-            embed.add_field(name='Заявитель', value=str(self.full_name), inline=True)
+            embed.add_field(name='Заявитель', value=interaction.user.mention, inline=True)
             embed.add_field(name='Подразделение', value=str(self.department), inline=True)
             embed.add_field(name='Запрошенное имущество', value=fmt_items(parsed), inline=False)
             embed.add_field(name='Причина', value=str(self.reason), inline=False)
@@ -179,7 +178,7 @@ class WarehouseRequestModal(discord.ui.Modal, title='Запрос со скла�
             with db() as c:
                 cur = c.execute('''INSERT INTO records(kind,number,user_id,user_name,department,items,reason,created_at)
                     VALUES('request',?,?,?,?,?,?,?)''',
-                    (number, interaction.user.id, str(self.full_name), str(self.department), '\n'.join(f'{n}|{q}' for n,q in parsed), str(self.reason), now()))
+                    (number, interaction.user.id, str(interaction.user), str(self.department), '\n'.join(f'{n}|{q}' for n,q in parsed), str(self.reason), now()))
                 record_id = cur.lastrowid
             view = DecisionView(record_id, 'request')
             msg = await send_review(interaction.guild, embed, view)
@@ -350,8 +349,7 @@ async def decide(interaction: discord.Interaction, record_id: int, kind: str, ap
             row = c.execute('SELECT quantity FROM inventory WHERE item=? COLLATE NOCASE', (name,)).fetchone()
             updated_items.append(f'{name}: {row["quantity"] if row else 0} шт. на складе')
     action = f'{kind_label} №{number:03d} — {status}. Проверил: {interaction.user}. Причина: {reason or "—"}'
-    if kind != 'request':
-        add_audit('Решение по обращению', action, interaction.user)
+    add_audit('Решение по обращению', action, interaction.user)
     for child in interaction.message.components:
         pass
     try:
@@ -365,10 +363,9 @@ async def decide(interaction: discord.Interaction, record_id: int, kind: str, ap
     except discord.HTTPException:
         pass
     await interaction.response.send_message(f'✅ {kind_label} №{number:03d}: {status.lower()}.', ephemeral=True)
-    if kind != 'request':
-        await send_audit(interaction.guild, f'{"✅" if approved else "❌"} {kind_label} №{number:03d}: {status}',
-                         f'Проверил: {interaction.user.mention}\nПричина: {reason or "Не указана"}\n' + ('\n'.join(updated_items) if updated_items else ''),
-                         discord.Color.green() if approved else discord.Color.red())
+    await send_audit(interaction.guild, f'{"✅" if approved else "❌"} {kind_label} №{number:03d}: {status}',
+                     f'Проверил: {interaction.user.mention}\nПричина: {reason or "Не указана"}\n' + ('\n'.join(updated_items) if updated_items else ''),
+                     discord.Color.green() if approved else discord.Color.red())
     try:
         user = interaction.guild.get_member(rec['user_id']) or await bot.fetch_user(rec['user_id'])
         await user.send(f'{"✅" if approved else "❌"} Ваш {kind_label.lower()} №{number:03d} {status.lower()}.\nПричина: {reason or "Не указана"}')
