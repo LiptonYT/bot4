@@ -368,7 +368,24 @@ async def decide(interaction: discord.Interaction, record_id: int, kind: str, ap
                      discord.Color.green() if approved else discord.Color.red())
     try:
         user = interaction.guild.get_member(rec['user_id']) or await bot.fetch_user(rec['user_id'])
-        await user.send(f'{"✅" if approved else "❌"} Ваш {kind_label.lower()} №{number:03d} {status.lower()}.\nПричина: {reason or "Не указана"}')
+        dm_color = discord.Color.from_rgb(46, 204, 113) if approved else discord.Color.from_rgb(231, 76, 60)
+        dm_embed = discord.Embed(
+            title=f'{"✅ Запрос одобрен" if approved and kind == "request" else "❌ Запрос отклонён" if kind == "request" else "✅ Поставка одобрена" if approved else "❌ Поставка отклонена"}',
+            description=(
+                f'Ваше обращение **№{number:03d}** рассмотрено старшим составом.\n\n'
+                f'{"Имущество будет выдано согласно одобренному запросу." if approved and kind == "request" else "Поставка принята и имущество добавлено на склад." if approved else "Обращение не было одобрено."}'
+            ),
+            color=dm_color,
+            timestamp=datetime.now(timezone.utc),
+        )
+        dm_embed.add_field(name='📋 Тип обращения', value='Запрос со склада' if kind == 'request' else 'Отчёт о поставке', inline=True)
+        dm_embed.add_field(name='🆔 Номер', value=f'№{number:03d}', inline=True)
+        dm_embed.add_field(name='📦 Имущество', value='\n'.join(f'• **{name}** — {qty} шт.' for name, qty in items)[:1024], inline=False)
+        dm_embed.add_field(name='📝 Причина решения', value=reason or 'Не указана', inline=False)
+        if approved and kind == 'request' and updated_items:
+            dm_embed.add_field(name='🏬 Остатки после выдачи', value='\n'.join(updated_items)[:1024], inline=False)
+        dm_embed.set_footer(text='ПГО «Каратели» • Склад')
+        await user.send(embed=dm_embed)
     except (discord.HTTPException, AttributeError):
         pass
 
